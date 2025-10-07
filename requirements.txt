@@ -48,7 +48,7 @@ typing-inspection==0.4.1
 typing_extensions==4.15.0
 urllib3==2.5.0
 uvicorn==0.36.0
-apscheduler==3.10.4
-mailersend==1.3.0 
-pyjwt==2.8.0
-zerobounce==0.2.0
+apscheduler
+mailersend
+pyjwt
+zerobounce
