@@ -49,23 +49,23 @@ SUBSCRIPTION_PLANS = {
     "free": {
         "name": "Free",
         "price": 0,
-        "currency": "NGN",
-        "leads_limit": 10,
+        "currency": "USD",
+        "leads_limit": 200,
         "description": "Perfect for getting started"
     },
     "pro": {
         "name": "Pro",
-        "price": 5000,
-        "currency": "NGN",
-        "leads_limit": 100,
-        "description": "For growing businesses"
+        "price": 39.99,
+        "currency": "USD",
+        "leads_limit": 5000,
+        "description": "Ideal for growing team"
     },
     "enterprise": {
         "name": "Enterprise",
-        "price": 15000,
-        "currency": "NGN",
-        "leads_limit": 1000,
-        "description": "For large-scale operations"
+        "price": 129.99,
+        "currency": "USD",
+        "leads_limit": 30000,
+        "description": "For large-scale teams that need power and flexibility"
     }
 }
 
