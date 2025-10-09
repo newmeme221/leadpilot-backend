@@ -50,21 +50,21 @@ SUBSCRIPTION_PLANS = {
         "name": "Free",
         "price": 0,
         "currency": "USD",
-        "leads_limit": 200,
+        "leads_limit": 500,
         "description": "Perfect for getting started"
     },
     "pro": {
         "name": "Pro",
-        "price": 39.99,
+        "price": 29.99,
         "currency": "USD",
-        "leads_limit": 5000,
+        "leads_limit": 10000,
         "description": "Ideal for growing team"
     },
     "enterprise": {
         "name": "Enterprise",
-        "price": 129.99,
+        "price": 99.99,
         "currency": "USD",
-        "leads_limit": 30000,
+        "leads_limit": 100000,
         "description": "For large-scale teams that need power and flexibility"
     }
 }
