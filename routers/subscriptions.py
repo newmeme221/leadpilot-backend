@@ -1,33 +1,48 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Request
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from models import User 
-from models import Lead
+from models import User, Lead, Campaign, LeadBatch, Notification
 from database import get_session
 from auth_utils import get_current_user
 
 import os
-import stripe
+import httpx
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import hashlib
+import hmac
 
 router = APIRouter(prefix="/api/subscriptions", tags=["subscriptions"])
 
 
-
-# Stripe initialization helper
-def get_stripe_api_key():
-    test_mode = os.getenv("STRIPE_TEST_MODE", "false").lower() == "true"
+# Flutterwave configuration helper
+def get_flutterwave_config():
+    """Get Flutterwave API configuration"""
+    test_mode = os.getenv("FLUTTERWAVE_TEST_MODE", "false").lower() == "true"
+    
     if test_mode:
-        key = os.getenv("STRIPE_TEST_SECRET_KEY")
-        if not key:
-            raise HTTPException(status_code=500, detail="STRIPE_TEST_SECRET_KEY environment variable is required for test mode")
+        secret_key = os.getenv("FLUTTERWAVE_TEST_SECRET_KEY")
+        public_key = os.getenv("FLUTTERWAVE_TEST_PUBLIC_KEY")
+        if not secret_key or not public_key:
+            raise HTTPException(
+                status_code=500, 
+                detail="FLUTTERWAVE_TEST_SECRET_KEY and FLUTTERWAVE_TEST_PUBLIC_KEY are required for test mode"
+            )
     else:
-        key = os.getenv("STRIPE_SECRET_KEY")
-        if not key:
-            raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY environment variable is required")
-    stripe.api_key = key
-    return key
+        secret_key = os.getenv("FLUTTERWAVE_SECRET_KEY")
+        public_key = os.getenv("FLUTTERWAVE_PUBLIC_KEY")
+        if not secret_key or not public_key:
+            raise HTTPException(
+                status_code=500,
+                detail="FLUTTERWAVE_SECRET_KEY and FLUTTERWAVE_PUBLIC_KEY are required"
+            )
+    
+    return {
+        "secret_key": secret_key,
+        "public_key": public_key,
+        "base_url": "https://api.flutterwave.com/v3"
+    }
+
 
 # Subscription plans
 SUBSCRIPTION_PLANS = {
@@ -54,13 +69,18 @@ SUBSCRIPTION_PLANS = {
     }
 }
 
+
 @router.get("/plans")
 async def get_subscription_plans():
     """Get available subscription plans"""
     return list(SUBSCRIPTION_PLANS.values())
 
+
 @router.get("/current")
-async def get_current_subscription(session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+async def get_current_subscription(
+    session: AsyncSession = Depends(get_session), 
+    user: User = Depends(get_current_user)
+):
     """Get user's current subscription details"""
     plan = SUBSCRIPTION_PLANS.get(user.subscription_tier, SUBSCRIPTION_PLANS["free"])
     
@@ -81,95 +101,280 @@ async def create_payment(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user)
 ):
-    """Create a Stripe payment for subscription"""
+    """Create a Flutterwave payment for subscription"""
     if plan_tier not in SUBSCRIPTION_PLANS:
         raise HTTPException(status_code=400, detail="Invalid subscription plan")
+    
     plan = SUBSCRIPTION_PLANS[plan_tier]
-    get_stripe_api_key()
+    
+    if plan["price"] == 0:
+        raise HTTPException(status_code=400, detail="Cannot create payment for free plan")
+    
+    config = get_flutterwave_config()
+    
     try:
-        # Create Stripe Checkout Session
-        checkout_session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            customer_email=user.email,
-            line_items=[{
-                "price_data": {
-                    "currency": plan["currency"].lower(),
-                    "product_data": {
-                        "name": f"{plan['name']} Subscription"
-                    },
-                    "unit_amount": plan["price"] * 100,
-                },
-                "quantity": 1,
-            }],
-            mode="payment",
-            success_url=os.getenv("FRONTEND_URL", "http://localhost:3000") + "/pricing?success=true",
-            cancel_url=os.getenv("FRONTEND_URL", "http://localhost:3000") + "/pricing?cancel=true",
-            notification_metadata={
-                "user_id": user.id,
+        # Generate unique transaction reference
+        tx_ref = f"SUB-{user.id}-{int(datetime.utcnow().timestamp())}"
+        
+        # Prepare payment payload
+        payload = {
+            "tx_ref": tx_ref,
+            "amount": plan["price"],
+            "currency": plan["currency"],
+            "redirect_url": os.getenv("FRONTEND_URL", "http://localhost:3000") + "/pricing?redirect=true",
+            "customer": {
+                "email": user.email,
+                "name": user.email.split("@")[0]  # Use email prefix as name
+            },
+            "customizations": {
+                "title": f"{plan['name']} Subscription",
+                "description": plan["description"],
+                "logo": os.getenv("LOGO_URL", "")
+            },
+            "meta": {
+                "user_id": str(user.id),
                 "plan_tier": plan_tier,
                 "type": "subscription"
             }
+        }
+        
+        # Initialize payment with Flutterwave
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config['base_url']}/payments",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {config['secret_key']}",
+                    "Content-Type": "application/json"
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Flutterwave API error: {response.text}"
+                )
+            
+            data = response.json()
+            
+            if data.get("status") != "success":
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                )
+            
+            return {
+                "checkout_url": data["data"]["link"],
+                "tx_ref": tx_ref
+            }
+    
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create Flutterwave payment: {str(e)}"
         )
-        return {"checkout_url": checkout_session.url}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create Stripe payment: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
 
 
-# Stripe webhook endpoint
-from fastapi import Request
-import hmac
-import hashlib
+@router.get("/verify-payment/{tx_ref}")
+async def verify_payment(
+    tx_ref: str,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user)
+):
+    """Verify payment status after redirect"""
+    config = get_flutterwave_config()
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{config['base_url']}/transactions/verify_by_reference",
+                params={"tx_ref": tx_ref},
+                headers={
+                    "Authorization": f"Bearer {config['secret_key']}",
+                    "Content-Type": "application/json"
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to verify payment"
+                )
+            
+            data = response.json()
+            
+            if data.get("status") != "success":
+                return {
+                    "status": "failed",
+                    "message": "Payment verification failed"
+                }
+            
+            transaction = data["data"]
+            
+            # Check if payment was successful
+            if transaction["status"] == "successful" and transaction["currency"] == "NGN":
+                # Extract metadata
+                meta = transaction.get("meta", {})
+                plan_tier = meta.get("plan_tier")
+                
+                if plan_tier and plan_tier in SUBSCRIPTION_PLANS:
+                    # Update user subscription
+                    user.subscription_tier = plan_tier
+                    user.subscription_status = "active"
+                    user.subscription_expires_at = datetime.utcnow() + timedelta(days=30)
+                    
+                    session.add(user)
+                    await session.commit()
+                    
+                    return {
+                        "status": "success",
+                        "message": "Subscription activated successfully",
+                        "plan": SUBSCRIPTION_PLANS[plan_tier]
+                    }
+            
+            return {
+                "status": "pending",
+                "message": "Payment is being processed"
+            }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Verification error: {str(e)}"
+        )
+
 
 @router.post("/webhook")
-async def handle_stripe_webhook(request: Request, session: AsyncSession = Depends(get_session)):
-    get_stripe_api_key()
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-    event = None
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, endpoint_secret
+async def handle_flutterwave_webhook(
+    request: Request,
+    session: AsyncSession = Depends(get_session)
+):
+    """Handle Flutterwave webhook notifications"""
+    config = get_flutterwave_config()
+    
+    # Get webhook secret hash
+    webhook_secret = os.getenv("FLUTTERWAVE_WEBHOOK_SECRET_HASH", "")
+    
+    # Verify webhook signature
+    signature = request.headers.get("verif-hash")
+    
+    if not signature or signature != webhook_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature"
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
-
-    if event["type"] == "checkout.session.completed":
-        session_obj = event["data"]["object"]
-        notification_metadata = session_obj.get("notification_metadata", {})
-        if notification_metadata.get("type") == "subscription":
-            user_id = notification_metadata.get("user_id")
-            plan_tier = notification_metadata.get("plan_tier")
-            result = await session.execute(select(User).where(User.id == int(user_id)))
+    
+    try:
+        payload = await request.json()
+        
+        # Handle successful payment
+        if payload.get("event") == "charge.completed":
+            data = payload.get("data", {})
+            
+            # Only process successful payments
+            if data.get("status") != "successful":
+                return {"status": "ignored"}
+            
+            # Extract metadata
+            meta = data.get("meta", {})
+            if meta.get("type") != "subscription":
+                return {"status": "ignored"}
+            
+            user_id = meta.get("user_id")
+            plan_tier = meta.get("plan_tier")
+            
+            if not user_id or not plan_tier:
+                return {"status": "error", "message": "Missing metadata"}
+            
+            # Get user and update subscription
+            result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
             user = result.scalar_one_or_none()
+            
             if user:
                 user.subscription_tier = plan_tier
                 user.subscription_status = "active"
                 user.subscription_expires_at = datetime.utcnow() + timedelta(days=30)
+                
                 session.add(user)
+                
                 try:
                     await session.commit()
+                    
+                    # Create notification for user
+                    notification = Notification(
+                        user_id=user.id,
+                        type="subscription",
+                        message=f"Your {SUBSCRIPTION_PLANS[plan_tier]['name']} subscription has been activated!",
+                        priority="info",
+                        created_at=datetime.utcnow()
+                    )
+                    session.add(notification)
+                    await session.commit()
+                    
                 except Exception as db_exc:
-                    # Optionally log db_exc here
-                    raise HTTPException(status_code=500, detail=f"Database error during webhook: {str(db_exc)}")
-    return {"status": "success"}
+                    await session.rollback()
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Database error: {str(db_exc)}"
+                    )
+        
+        return {"status": "success"}
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Webhook processing error: {str(e)}"
+        )
+
 
 @router.post("/cancel")
-async def cancel_subscription(session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+async def cancel_subscription(
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user)
+):
     """Cancel user's subscription"""
     user.subscription_status = "cancelled"
     session.add(user)
+    
     try:
         await session.commit()
+        
+        # Create notification
+        notification = Notification(
+            user_id=user.id,
+            type="subscription",
+            message="Your subscription has been cancelled. You can continue using your current plan until it expires.",
+            priority="info",
+            created_at=datetime.utcnow()
+        )
+        session.add(notification)
+        await session.commit()
+        
     except Exception as db_exc:
-        # Optionally log db_exc here
-        raise HTTPException(status_code=500, detail=f"Database error during cancellation: {str(db_exc)}")
+        await session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(db_exc)}"
+        )
+    
     return {"message": "Subscription cancelled successfully"}
 
+
 @router.get("/usage")
-async def get_usage_stats(session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)):
+async def get_usage_stats(
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user)
+):
     """Get user's current usage statistics"""
-    from models import Lead, Campaign, Notification
     # Count leads linked to user's campaigns
     campaign_leads_result = await session.execute(
         select(Lead)
@@ -179,7 +384,6 @@ async def get_usage_stats(session: AsyncSession = Depends(get_session), user: Us
     campaign_leads = campaign_leads_result.scalars().all()
 
     # Count leads in batches owned by the user
-    from models import LeadBatch
     batch_result = await session.execute(
         select(Lead)
         .join(LeadBatch)
@@ -190,6 +394,7 @@ async def get_usage_stats(session: AsyncSession = Depends(get_session), user: Us
     # Combine and deduplicate leads
     all_leads = {lead.id for lead in campaign_leads} | {lead.id for lead in batch_leads}
     current_usage = len(all_leads)
+    
     plan = SUBSCRIPTION_PLANS.get(user.subscription_tier, SUBSCRIPTION_PLANS["free"])
     limit = plan["leads_limit"]
     warning_threshold = limit * 0.8
@@ -213,18 +418,22 @@ async def get_usage_stats(session: AsyncSession = Depends(get_session), user: Us
             )
         )
         exists = notification_exists.scalar_one_or_none()
+        
         if not exists:
             notification = Notification(
                 user_id=user.id,
                 type="usage_limit",
                 message=f"You are approaching your usage limit ({current_usage}/{limit} leads).",
+                priority="warning",
                 created_at=datetime.utcnow()
             )
             session.add(notification)
             await session.commit()
+    
     return {
         "current_usage": current_usage,
         "limit": limit,
         "remaining": max(0, limit - current_usage),
-        "tier": user.subscription_tier
+        "tier": user.subscription_tier,
+        "percentage_used": round((current_usage / limit * 100), 2) if limit > 0 else 0
     }
