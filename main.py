@@ -9,22 +9,11 @@ from database import engine
 from models import SQLModel
 from utils.followup_scheduler import start_scheduler, stop_scheduler
 import os 
-from pathlib import Path
-from fastapi.responses import FileResponse
+
 
 app = FastAPI() 
 
-# Path to your frontend build folder
-frontend_path = Path(__file__).parent.parent / "frontend"
 
-# Mount static files (CSS, JS, images, etc.)
-app.mount("/assets", StaticFiles(directory=frontend_path / "assets"), name="assets")
-
-# Serve index.html for all routes not handled by API
-@app.get("/{full_path:path}")
-async def serve_react_app(full_path: str):
-    index_file = frontend_path / "index.html"
-    return FileResponse(index_file)
 
 # CORS for local frontend dev
 app.add_middleware(
