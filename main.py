@@ -1,15 +1,30 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from auth import router as auth_router
+from auth import router as auth_router 
+from fastapi.staticfiles import StaticFiles
 from routers import leads_router, campaigns_router, logs_router, ai_router, activity_router, subscriptions_router, tickets_router,users_router
 from routers.notifications import router as notifications_router
 from routers.inbound_email import router as inbound_email_router
 from database import engine
 from models import SQLModel
 from utils.followup_scheduler import start_scheduler, stop_scheduler
-import os
+import os 
+from pathlib import Path
+from fastapi.responses import FileResponse
 
-app = FastAPI()
+app = FastAPI() 
+
+# Path to your frontend build folder
+frontend_path = Path(__file__).parent.parent / "frontend"
+
+# Mount static files (CSS, JS, images, etc.)
+app.mount("/assets", StaticFiles(directory=frontend_path / "assets"), name="assets")
+
+# Serve index.html for all routes not handled by API
+@app.get("/{full_path:path}")
+async def serve_react_app(full_path: str):
+    index_file = frontend_path / "index.html"
+    return FileResponse(index_file)
 
 # CORS for local frontend dev
 app.add_middleware(
