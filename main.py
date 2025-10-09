@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router 
-from fastapi.staticfiles import StaticFiles
+# Static files are served separately when frontend is hosted on a static site
 from routers import leads_router, campaigns_router, logs_router, ai_router, activity_router, subscriptions_router, tickets_router,users_router
 from routers.notifications import router as notifications_router
 from routers.inbound_email import router as inbound_email_router
@@ -15,10 +15,17 @@ app = FastAPI()
 
 
 
-# CORS for local frontend dev
+# CORS: read allowed origins from FRONTEND_ORIGINS (comma-separated) for production.
+# If not set, default to permissive ['*'] to preserve local dev behavior.
+frontend_origins = os.getenv("FRONTEND_ORIGINS", "").strip()
+if frontend_origins:
+    allow_origins = [o.strip() for o in frontend_origins.split(",") if o.strip()]
+else:
+    allow_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
