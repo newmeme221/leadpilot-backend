@@ -427,22 +427,62 @@ async def send_email_via_mailersend(
                 json=payload,
                 headers=headers
             )
-        
-        if response.status_code == 202:  # MailerSend returns 202 Accepted
-            response_data = response.json() if response.text else {}
+
+        # Try to parse JSON safely
+        resp_text = response.text if hasattr(response, 'text') else None
+        resp_json = None
+        if resp_text:
+            try:
+                resp_json = response.json()
+            except Exception:
+                resp_json = None
+
+        # MailerSend may return 202 Accepted (or 200/201 depending on endpoint); treat 2xx as success
+        if 200 <= response.status_code < 300:
+            # attempt to extract a message id from common places
+            message_id = None
+            if resp_json:
+                # Some MailerSend responses include an 'data' object or message id keys
+                if isinstance(resp_json, dict):
+                    # try common shapes
+                    if 'data' in resp_json:
+                        # data may be dict or list
+                        data = resp_json['data']
+                        if isinstance(data, dict):
+                            message_id = data.get('id') or data.get('message_id')
+                        elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                            message_id = data[0].get('id') or data[0].get('message_id')
+                    message_id = message_id or resp_json.get('message_id') or resp_json.get('id')
+
+            # fallback to headers
+            message_id = message_id or response.headers.get('X-Message-Id') or response.headers.get('Message-Id')
+
             return {
                 "success": True,
-                "message_id": response_data.get("message_id") if response_data else response.headers.get("X-Message-Id"),
-                "status_code": response.status_code
+                "message_id": message_id,
+                "status_code": response.status_code,
+                "response": resp_json or resp_text,
             }
+
+        # Non-2xx: return diagnostic info
+        err_body = None
+        if resp_json:
+            # try to find a message
+            if isinstance(resp_json, dict):
+                err_body = resp_json.get('message') or resp_json.get('error') or resp_json
+            else:
+                err_body = resp_json
         else:
-            error_data = response.json() if response.text else {}
-            return {
-                "success": False,
-                "error": error_data.get("message", response.text),
-                "status_code": response.status_code
-            }
-    
+            err_body = resp_text
+
+        logging.warning(f"MailerSend returned non-2xx status: {response.status_code} - {err_body}")
+        return {
+            "success": False,
+            "error": err_body,
+            "status_code": response.status_code,
+            "response": resp_json or resp_text,
+        }
+
     except httpx.RequestError as e:
         logging.error(f"MailerSend request error: {e}")
         return {
