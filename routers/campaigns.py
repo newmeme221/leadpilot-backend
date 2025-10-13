@@ -15,6 +15,7 @@ import os
 import logging
 import asyncio
 from schemas import CampaignCreate, FollowUpMessageCreate
+import jinja2
 
 from sqlalchemy.exc import NoResultFound
 
@@ -593,13 +594,29 @@ async def send_email_campaign(
             }
             
             # Apply basic template formatting first
+            # Render subject/body as Jinja2 templates so authors can use
+            # placeholders (e.g. {{ first_name }}) and control structures
+            # (loops, conditionals) for advanced personalization.
             try:
-                base_subject = campaign.subject.format(**vars_dict)
-                base_body = campaign.body.format(**vars_dict)
-            except KeyError as e:
-                logging.warning(f"Template formatting error for lead {lead.id}: {e}")
-                base_subject = campaign.subject
-                base_body = campaign.body
+                jinja_env = jinja2.Environment(
+                    autoescape=jinja2.select_autoescape(["html", "xml"]),
+                )
+                # Build render context: lead fields + any per-lead personalization vars
+                render_context = {
+                    **{k: (v if v is not None else "") for k, v in lead_data.items()},
+                    **{k: (v if v is not None else "") for k, v in vars_dict.items()},
+                }
+
+                subj_template = jinja_env.from_string(campaign.subject or "")
+                body_template = jinja_env.from_string(campaign.body or "")
+
+                base_subject = subj_template.render(**render_context).strip()
+                base_body = body_template.render(**render_context)
+            except Exception as e:
+                logging.warning(f"Template rendering error for lead {lead.id}: {e}")
+                # Fallback to raw campaign strings
+                base_subject = campaign.subject or ""
+                base_body = campaign.body or ""
             
             # AI-powered variation and personalization
             varied_content = await ai_vary_content(
